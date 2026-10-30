@@ -87,7 +87,19 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
   /// The XPC send barrier only confirms the bytes reached the connection, not that the daemon
   /// consumed them, and `dtuhidd` does not reply to events or barriers — so a bounded wait is the
   /// only signal available. It runs once per gesture (in `flush()`), not after every primitive.
-  private static let drainNanos: UInt64 = 80_000_000 // 80ms
+  static let drainNanos: UInt64 = 80_000_000 // 80ms
+
+  /// How long after connecting the first event send is held back. `dtuhidd` builds a fresh set of
+  /// virtual HID services for every peer connection (measured 175-250 ms) and only then handles the
+  /// queued events; `backboardd` needs a further ~35-65 ms to attach them. A short-lived host process
+  /// that disconnects before that cancels the services with its touch still queued, so the touch is
+  /// silently lost; and events queued during setup are replayed as one burst, distorting a gesture's
+  /// timing. Holding the first send until the session is up fixes both, and the gesture then runs
+  /// with its real timing. `dtuhidd` never replies, so this is a bounded wait rather than a
+  /// handshake. Override with `FB_DTUHID_READINESS_MS` (clamped to 0...2000).
+  static let defaultReadinessMillis = 400
+  static let maximumReadinessMillis = 2000
+  static let readinessEnvironmentKey = "FB_DTUHID_READINESS_MS"
 
   /// The host→guest XPC connection to `dtuhidd`. XPC connections are thread-safe, so it is marked
   /// `nonisolated(unsafe)` to be read from the `nonisolated` `disconnect()` as well as the
@@ -95,6 +107,16 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
   nonisolated(unsafe) private let connection: xpc_connection_t
   private let mainScreenSize: CGSize
   private let mainScreenScale: Float
+  /// When the connection was established (`DispatchTime` uptime nanoseconds); sends measure the
+  /// readiness interval from here. Immutable, so it needs no isolation.
+  ///
+  /// It is not re-armed if the XPC connection is interrupted (e.g. `dtuhidd` restarts while a
+  /// long-lived caller holds the transport): the next message then starts a new peer session that
+  /// is not waited for. Re-arming needs a mutable, synchronised anchor and a fresh warm-up on
+  /// `XPC_ERROR_CONNECTION_INTERRUPTED`; it is left as a follow-up.
+  private let connectedAtNanos: UInt64
+  /// The readiness interval for this connection (see `defaultReadinessMillis`).
+  private let readinessNanos: UInt64
   /// Per-touchscreen contact state for single- and two-finger touches.
   private var contacts = DigitizerContactTrackers()
   private var twoFingerContacts = DigitizerContactTrackers()
@@ -102,7 +124,8 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
   // MARK: Initializers
 
   /// Builds a DTUHID transport for the provided Simulator, establishing the host XPC connection to
-  /// `dtuhidd`. All setup is synchronous, so the returned transport is ready to send.
+  /// `dtuhidd` and sending the warm-up message. Setup returns at once; the first event sent waits
+  /// until the `dtuhidd` session is ready (see `defaultReadinessMillis`).
   static func dtuhid(for simulator: FBSimulator) throws -> FBSimulatorDTUHIDTransport {
     guard let handle = dlopen(nil, RTLD_NOW) else {
       throw FBSimulatorHIDError.dtuhidXPCSymbolsUnavailable
@@ -133,16 +156,28 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
     xpc_connection_set_event_handler(connection) { _ in }
     xpc_connection_resume(connection)
 
-    return FBSimulatorDTUHIDTransport(
+    let transport = FBSimulatorDTUHIDTransport(
       connection: connection,
       mainScreenSize: simulator.device.deviceType.mainScreenSize,
       mainScreenScale: simulator.device.deviceType.mainScreenScale)
+    // XPC connects lazily, on the first message: send a no-op now so `dtuhidd` starts building this
+    // peer's services immediately, in parallel with whatever the caller does before its first event.
+    transport.sendWarmUp()
+    return transport
   }
 
-  init(connection: xpc_connection_t, mainScreenSize: CGSize, mainScreenScale: Float) {
+  init(
+    connection: xpc_connection_t,
+    mainScreenSize: CGSize,
+    mainScreenScale: Float,
+    readinessNanos: UInt64 = FBSimulatorDTUHIDTransport.readinessNanos(),
+    connectedAtNanos: UInt64 = DispatchTime.now().uptimeNanoseconds
+  ) {
     self.connection = connection
     self.mainScreenSize = mainScreenSize
     self.mainScreenScale = mainScreenScale
+    self.readinessNanos = readinessNanos
+    self.connectedAtNanos = connectedAtNanos
   }
 
   private static func symbol<T>(_ handle: UnsafeMutableRawPointer, _ name: String, as type: T.Type) -> T? {
@@ -258,10 +293,14 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
   }
 
   /// Encodes `payload`, sends it over the connection, and resolves when the XPC send barrier fires.
-  /// The actor serializes calls, so per-gesture state stays consistent. Does not wait for the daemon
-  /// to consume the event — that is `flush()`'s job, run once per gesture rather than per primitive.
+  /// The actor serializes calls, so per-gesture state stays consistent. On a fresh connection the
+  /// send is first held until the `dtuhidd` session is ready (see `readinessWaitNanos`), so the
+  /// first gesture reaches `backboardd` with its real timing; once the interval has passed, sends
+  /// go out at once. Does not wait for the daemon to consume the event — that is `flush()`'s job,
+  /// run once per gesture rather than per primitive.
   func send(messageType: String, payload: some Encodable) async throws {
     let object = try encode(messageType: messageType, payload: payload)
+    await waitForSessionReadiness()
     try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       xpc_connection_send_message(connection, object)
       xpc_connection_send_barrier(connection) {
@@ -270,11 +309,66 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
     }
   }
 
+  /// Sleeps until the readiness interval has passed since connecting; returns at once afterwards.
+  /// Deadline-based, so concurrent or later sends need no extra state.
+  private func waitForSessionReadiness() async {
+    let elapsed = DispatchTime.now().uptimeNanoseconds &- connectedAtNanos
+    let wait = Self.readinessWaitNanos(elapsedSinceConnect: elapsed, readinessNanos: readinessNanos)
+    if wait > 0 {
+      try? await Task.sleep(nanoseconds: wait)
+    }
+  }
+
   /// Drains the connection once a gesture's events have all been sent: waits `drainNanos` so
   /// `dtuhidd` consumes them before the connection is torn down. Run once per gesture (see
   /// `drainNanos`), not after every primitive.
   func flush() async throws {
     try? await Task.sleep(nanoseconds: Self.drainNanos)
+  }
+
+  /// Sends the connection's warm-up message: an `IndigoDigitizerEvent` `end` with no active
+  /// contact, which `dtuhidd` accepts without producing a touch, but which makes it begin the
+  /// peer session (create its virtual services). Does not touch the contact state.
+  nonisolated func sendWarmUp() {
+    guard let object = try? encode(messageType: "IndigoDigitizerEvent", payload: Self.warmUpEvent()) else {
+      return
+    }
+    xpc_connection_send_message(connection, object)
+  }
+
+  // MARK: Session readiness
+
+  /// The warm-up payload: an `end` on the main touchscreen with no contact in progress.
+  static func warmUpEvent() -> IndigoDigitizerEvent {
+    IndigoDigitizerEvent(pointOne: DigitizerPoint(x: 0, y: 0), eventType: .end)
+  }
+
+  /// How long a send is held: the part of the readiness interval not yet elapsed since connecting,
+  /// or `0` once it has passed. So the first event on a fresh connection waits out `dtuhidd`'s
+  /// session setup, and every later one goes out at once.
+  static func readinessWaitNanos(elapsedSinceConnect: UInt64, readinessNanos: UInt64) -> UInt64 {
+    readinessNanos > elapsedSinceConnect ? readinessNanos - elapsedSinceConnect : 0
+  }
+
+  /// The readiness interval from `FB_DTUHID_READINESS_MS`, trimmed of whitespace and newlines: an
+  /// integer is clamped to `0...maximumReadinessMillis` (an all-digit value too large for `Int`
+  /// clamps the same way); anything else, or no value, gives `defaultReadinessMillis`.
+  static func readinessNanos(environment: [String: String] = ProcessInfo.processInfo.environment) -> UInt64 {
+    UInt64(readinessMillis(environment[readinessEnvironmentKey])) * 1_000_000
+  }
+
+  private static func readinessMillis(_ raw: String?) -> Int {
+    guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+      return defaultReadinessMillis
+    }
+    if let value = Int(text) {
+      return min(max(value, 0), maximumReadinessMillis)
+    }
+    let digits = text.first == "-" || text.first == "+" ? text.dropFirst() : Substring(text)
+    guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }) else {
+      return defaultReadinessMillis
+    }
+    return text.first == "-" ? 0 : maximumReadinessMillis
   }
 
 }
