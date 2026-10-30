@@ -43,6 +43,9 @@ public enum FBSimulatorHIDError: Error, LocalizedError {
   case dtuhidXPCSymbolsUnavailable
   /// The `dtuhidd` host XPC connection could not be created.
   case dtuhidConnectionFailed
+  /// A touch's display target cannot be delivered by the selected transport (see
+  /// `FBSimulatorHIDDisplayTarget`); thrown before anything is sent.
+  case invalidDisplayTarget(displayID: UInt32, reason: String)
 
   public var errorDescription: String? {
     switch self {
@@ -76,6 +79,8 @@ public enum FBSimulatorHIDError: Error, LocalizedError {
       return "Could not resolve the private _4sim XPC endpoint symbols required for the DTUHID transport"
     case .dtuhidConnectionFailed:
       return "Could not create the dtuhidd host XPC connection"
+    case let .invalidDisplayTarget(displayID, reason):
+      return "Cannot deliver a touch to display \(displayID): \(reason)"
     }
   }
 }

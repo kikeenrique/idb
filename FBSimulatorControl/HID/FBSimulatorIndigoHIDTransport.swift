@@ -69,12 +69,23 @@ actor FBSimulatorIndigoHIDTransport: FBSimulatorHIDTransport {
     indigoClient.disconnect()
   }
 
-  func sendTouch(direction: FBSimulatorHIDDirection, x: Double, y: Double) async throws {
+  /// The Indigo `SimDeviceLegacyHIDClient` path has no display addressing: touches always reach the
+  /// main display, normalised against the main screen size. A target for the main display (`nil`,
+  /// `0` or `1`) is accepted; any other display throws `invalidDisplayTarget` (see
+  /// `validate(target:)`) rather than landing at the wrong point on the main display.
+  func sendTouch(
+    direction: FBSimulatorHIDDirection, x: Double, y: Double, target: FBSimulatorHIDDisplayTarget?
+  ) async throws {
+    try Self.validate(target: target)
     try await indigoClient.send(
       indigo.touchScreenSize(mainScreenSize, screenScale: mainScreenScale, direction: direction, x: x, y: y))
   }
 
-  func sendTwoFingerTouch(direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint) async throws {
+  /// `target` is validated as for `sendTouch`.
+  func sendTwoFingerTouch(
+    direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint, target: FBSimulatorHIDDisplayTarget?
+  ) async throws {
+    try Self.validate(target: target)
     try await indigoClient.send(
       indigo.twoFingerTouchScreenSize(
         mainScreenSize, screenScale: mainScreenScale, direction: direction, finger1: finger1, finger2: finger2))
@@ -96,4 +107,15 @@ actor FBSimulatorIndigoHIDTransport: FBSimulatorHIDTransport {
 
   /// No-op: the legacy client awaits delivery on every `send`, so there is nothing left to drain.
   func flush() async throws {}
+
+  /// Throws `invalidDisplayTarget` unless `target` is `nil` or addresses the main display. The
+  /// target's size is not used: Indigo normalises against the main screen size.
+  static func validate(target: FBSimulatorHIDDisplayTarget?) throws {
+    guard let target, !target.isMainDisplay else {
+      return
+    }
+    throw FBSimulatorHIDError.invalidDisplayTarget(
+      displayID: target.displayID,
+      reason: "the Indigo HID transport can only address the main display (0 or 1); use the DTUHID transport")
+  }
 }

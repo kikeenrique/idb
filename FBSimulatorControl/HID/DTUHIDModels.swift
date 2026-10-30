@@ -50,6 +50,12 @@ enum DigitizerEventType: UInt64, Encodable {
 
  `pointTwo` is `nil` for single-finger touch — `XPCEncoder` omits the key entirely, matching the
  single-contact wire shape. `eventType` / `edge` / `target` ride as `uint64`.
+
+ `target` is the simulator display id (CoreDevice's `DigitizerTarget`): `0` or `1` reach the main
+ touchscreen (service `0x101`), any other display id `N` reaches `touchscreen(0x100 | N)`. `dtuhidd`
+ decodes it as 8 bits, logs "No touchscreen service found" for an id with no touchscreen, and fails
+ the decode for values above 255. Point coordinates are normalised to that display's native
+ portrait pixel space.
  */
 struct IndigoDigitizerEvent: Encodable {
   let pointOne: DigitizerPoint

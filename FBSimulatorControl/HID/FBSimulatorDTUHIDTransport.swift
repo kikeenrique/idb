@@ -33,6 +33,27 @@ struct DigitizerContactTracker {
   }
 }
 
+/// One `DigitizerContactTracker` per `dtuhidd` touchscreen service, so a gesture on one display
+/// never continues (as `position`) a contact begun on another. Keyed by service, not by wire value:
+/// `nil`, `0` and `1` all reach `mainTouchscreen(0x101)` and share one tracker.
+struct DigitizerContactTrackers {
+  private var trackers: [UInt64: DigitizerContactTracker] = [:]
+
+  /// The tracker key for a target: `0` for the main touchscreen, otherwise the display id.
+  static func serviceKey(for target: FBSimulatorHIDDisplayTarget?) -> UInt64 {
+    guard let target, !target.isMainDisplay else {
+      return 0
+    }
+    return UInt64(target.displayID)
+  }
+
+  mutating func eventType(
+    for direction: FBSimulatorHIDDirection, target: FBSimulatorHIDDisplayTarget?
+  ) -> DigitizerEventType {
+    trackers[Self.serviceKey(for: target), default: DigitizerContactTracker()].eventType(for: direction)
+  }
+}
+
 /**
  The DTUHID transport (Xcode 27 / macOS 26 / iOS 26+).
 
@@ -74,8 +95,9 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
   nonisolated(unsafe) private let connection: xpc_connection_t
   private let mainScreenSize: CGSize
   private let mainScreenScale: Float
-  private var contact = DigitizerContactTracker()
-  private var twoFingerContact = DigitizerContactTracker()
+  /// Per-touchscreen contact state for single- and two-finger touches.
+  private var contacts = DigitizerContactTrackers()
+  private var twoFingerContacts = DigitizerContactTrackers()
 
   // MARK: Initializers
 
@@ -136,23 +158,75 @@ actor FBSimulatorDTUHIDTransport: FBSimulatorHIDTransport {
     xpc_connection_cancel(connection)
   }
 
-  func sendTouch(direction: FBSimulatorHIDDirection, x: Double, y: Double) async throws {
-    let ratio = FBSimulatorIndigoHID.screenRatio(
-      from: CGPoint(x: x, y: y), screenSize: mainScreenSize, screenScale: mainScreenScale)
-    let event = IndigoDigitizerEvent(
-      pointOne: DigitizerPoint(x: Double(ratio.x), y: Double(ratio.y)),
-      eventType: contact.eventType(for: direction))
+  func sendTouch(
+    direction: FBSimulatorHIDDirection, x: Double, y: Double, target: FBSimulatorHIDDisplayTarget?
+  ) async throws {
+    try Self.validate(target: target)
+    let eventType = contacts.eventType(for: direction, target: target)
+    let event = Self.digitizerEvent(
+      pointOne: CGPoint(x: x, y: y), eventType: eventType, target: target,
+      mainScreenSize: mainScreenSize, mainScreenScale: mainScreenScale)
     try await send(messageType: "IndigoDigitizerEvent", payload: event)
   }
 
-  func sendTwoFingerTouch(direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint) async throws {
-    let r1 = FBSimulatorIndigoHID.screenRatio(from: finger1, screenSize: mainScreenSize, screenScale: mainScreenScale)
-    let r2 = FBSimulatorIndigoHID.screenRatio(from: finger2, screenSize: mainScreenSize, screenScale: mainScreenScale)
-    let event = IndigoDigitizerEvent(
-      pointOne: DigitizerPoint(x: Double(r1.x), y: Double(r1.y)),
-      pointTwo: DigitizerPoint(x: Double(r2.x), y: Double(r2.y)),
-      eventType: twoFingerContact.eventType(for: direction))
+  func sendTwoFingerTouch(
+    direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint, target: FBSimulatorHIDDisplayTarget?
+  ) async throws {
+    try Self.validate(target: target)
+    let eventType = twoFingerContacts.eventType(for: direction, target: target)
+    let event = Self.digitizerEvent(
+      pointOne: finger1, pointTwo: finger2, eventType: eventType, target: target,
+      mainScreenSize: mainScreenSize, mainScreenScale: mainScreenScale)
     try await send(messageType: "IndigoDigitizerEvent", payload: event)
+  }
+
+  // MARK: Display targeting
+
+  /// The `IndigoDigitizerEvent.target` for a display target: its display id, or `0` (the main
+  /// touchscreen) when there is none. `dtuhidd` routes the event to service `0x100 | target`.
+  static func wireTarget(for target: FBSimulatorHIDDisplayTarget?) -> UInt64 {
+    UInt64(target?.displayID ?? 0)
+  }
+
+  /// Throws `invalidDisplayTarget` for a target `dtuhidd` cannot deliver to, before anything is
+  /// sent: an id that does not fit the 8-bit wire `target` (dtuhidd fails the decode and, since it
+  /// never replies, the touch would be lost silently), or a size or scale that cannot normalise a
+  /// point. Ids with no touchscreen (e.g. 2, 4) are only detectable inside the guest.
+  static func validate(target: FBSimulatorHIDDisplayTarget?) throws {
+    guard let target else {
+      return
+    }
+    if target.displayID > UInt32(UInt8.max) {
+      throw FBSimulatorHIDError.invalidDisplayTarget(
+        displayID: target.displayID, reason: "dtuhidd display targets are 8-bit (0...255)")
+    }
+    if let reason = target.geometryFailureReason {
+      throw FBSimulatorHIDError.invalidDisplayTarget(displayID: target.displayID, reason: reason)
+    }
+  }
+
+  /// Builds the digitizer payload for one or two contacts (in points) on `target`. Points are
+  /// normalised against the target display's native pixel size and scale, or against the device's
+  /// main screen when `target` is `nil` (the pre-target behaviour). Pure, so it is unit-testable.
+  static func digitizerEvent(
+    pointOne: CGPoint,
+    pointTwo: CGPoint? = nil,
+    eventType: DigitizerEventType,
+    target: FBSimulatorHIDDisplayTarget?,
+    mainScreenSize: CGSize,
+    mainScreenScale: Float
+  ) -> IndigoDigitizerEvent {
+    let screenSize = target?.nativeSize ?? mainScreenSize
+    let screenScale = target?.scale ?? mainScreenScale
+    func normalised(_ point: CGPoint) -> DigitizerPoint {
+      let ratio = FBSimulatorIndigoHID.screenRatio(from: point, screenSize: screenSize, screenScale: screenScale)
+      return DigitizerPoint(x: Double(ratio.x), y: Double(ratio.y))
+    }
+    return IndigoDigitizerEvent(
+      pointOne: normalised(pointOne),
+      pointTwo: pointTwo.map(normalised),
+      eventType: eventType,
+      target: wireTarget(for: target))
   }
 
   func sendButton(direction: FBSimulatorHIDDirection, button: FBSimulatorHIDButton) async throws {

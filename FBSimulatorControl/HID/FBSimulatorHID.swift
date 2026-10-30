@@ -71,7 +71,13 @@ public final class FBSimulatorHID: CustomStringConvertible, @unchecked Sendable 
     self.init(transport: transport, transportType: resolvedTransportType, purple: FBSimulatorPurpleHID(), simulator: simulator)
   }
 
-  private init(transport: FBSimulatorHIDTransport, transportType: FBSimulatorHIDTransportType, purple: FBSimulatorPurpleHID, simulator: FBSimulator) {
+  /// Internal so tests can drive the dispatch with a stub transport (`simulator` may then be `nil`).
+  init(
+    transport: FBSimulatorHIDTransport,
+    transportType: FBSimulatorHIDTransportType,
+    purple: FBSimulatorPurpleHID,
+    simulator: FBSimulator?
+  ) {
     self.transport = transport
     self.transportType = transportType
     self.purple = purple
@@ -89,14 +95,19 @@ public final class FBSimulatorHID: CustomStringConvertible, @unchecked Sendable 
 
   // MARK: Indigo Event Send Primitives
 
-  /// Sends a single-finger touch at the given point (in points).
-  func sendTouch(direction: FBSimulatorHIDDirection, x: Double, y: Double) async throws {
-    try await transport.sendTouch(direction: direction, x: x, y: y)
+  /// Sends a single-finger touch at the given point (in points) to `target` (`nil` = main display).
+  func sendTouch(
+    direction: FBSimulatorHIDDirection, x: Double, y: Double, target: FBSimulatorHIDDisplayTarget? = nil
+  ) async throws {
+    try await transport.sendTouch(direction: direction, x: x, y: y, target: target)
   }
 
-  /// Sends a two-finger touch (for multi-touch gestures) at the given points (in points).
-  func sendTwoFingerTouch(direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint) async throws {
-    try await transport.sendTwoFingerTouch(direction: direction, finger1: finger1, finger2: finger2)
+  /// Sends a two-finger touch (for multi-touch gestures) at the given points (in points) to `target`
+  /// (`nil` = main display).
+  func sendTwoFingerTouch(
+    direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint, target: FBSimulatorHIDDisplayTarget? = nil
+  ) async throws {
+    try await transport.sendTwoFingerTouch(direction: direction, finger1: finger1, finger2: finger2, target: target)
   }
 
   /// Sends a hardware button event.

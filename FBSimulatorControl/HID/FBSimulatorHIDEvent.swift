@@ -19,11 +19,15 @@ private let inCallStatusBarNotification = "com.apple.iphonesimulator.toggleincal
 /// A HID event that can be sent to a Simulator. A discriminated union of the primitive
 /// payloads (touch, button, keyboard, two-finger touch, orientation, shake, lock, in-call
 /// status bar, delay) plus a `composite` of ordered events.
+///
+/// Touch payloads take an optional `target` display (see `FBSimulatorHIDDisplayTarget`); it defaults
+/// to `nil`, the main display, so `.touch(direction:x:y:)` keeps its meaning.
 public indirect enum FBSimulatorHIDEvent: Equatable, Hashable {
-  case touch(direction: FBSimulatorHIDDirection, x: Double, y: Double)
+  case touch(direction: FBSimulatorHIDDirection, x: Double, y: Double, target: FBSimulatorHIDDisplayTarget? = nil)
   case button(direction: FBSimulatorHIDDirection, button: FBSimulatorHIDButton)
   case keyboard(direction: FBSimulatorHIDDirection, keyCode: UInt32)
-  case twoFingerTouch(direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint)
+  case twoFingerTouch(
+    direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint, target: FBSimulatorHIDDisplayTarget? = nil)
   case delay(TimeInterval)
   case deviceOrientation(FBSimulatorHIDDeviceOrientation)
   case shake
@@ -48,14 +52,14 @@ public extension FBSimulatorHIDEvent {
   /// A `.composite` sends its sub-events in order; `.delay` suspends the task.
   func sendAsync(on hid: FBSimulatorHID) async throws {
     switch self {
-    case let .touch(direction, x, y):
-      try await hid.sendTouch(direction: direction, x: x, y: y)
+    case let .touch(direction, x, y, target):
+      try await hid.sendTouch(direction: direction, x: x, y: y, target: target)
     case let .button(direction, button):
       try await hid.sendButton(direction: direction, button: button)
     case let .keyboard(direction, keyCode):
       try await hid.sendKeyboard(direction: direction, keyCode: keyCode)
-    case let .twoFingerTouch(direction, finger1, finger2):
-      try await hid.sendTwoFingerTouch(direction: direction, finger1: finger1, finger2: finger2)
+    case let .twoFingerTouch(direction, finger1, finger2, target):
+      try await hid.sendTwoFingerTouch(direction: direction, finger1: finger1, finger2: finger2, target: target)
     case let .delay(duration):
       try await Task.sleep(nanoseconds: UInt64(max(0, duration) * 1_000_000_000))
     case let .deviceOrientation(orientation):
@@ -96,6 +100,34 @@ public extension FBSimulatorHID {
       }
     }
     try await flush()
+  }
+
+  /// Sends `event` with every touch that has no display target routed to `target` (see
+  /// `FBSimulatorHIDEvent.targeting(_:)`), then drains once like `send(event:logger:)`. A `nil`
+  /// `target` sends the event unchanged.
+  func send(
+    event: FBSimulatorHIDEvent, target: FBSimulatorHIDDisplayTarget?, logger: FBControlCoreLogger
+  ) async throws {
+    try await send(event: target.map { event.targeting($0) } ?? event, logger: logger)
+  }
+}
+
+public extension FBSimulatorHIDEvent {
+
+  /// A copy of the event whose touch and two-finger-touch payloads without a target are routed to
+  /// `target`, recursing into composites. Payloads that already name a target, and non-touch
+  /// events, are left as they are.
+  func targeting(_ target: FBSimulatorHIDDisplayTarget) -> FBSimulatorHIDEvent {
+    switch self {
+    case let .touch(direction, x, y, nil):
+      return .touch(direction: direction, x: x, y: y, target: target)
+    case let .twoFingerTouch(direction, finger1, finger2, nil):
+      return .twoFingerTouch(direction: direction, finger1: finger1, finger2: finger2, target: target)
+    case let .composite(events):
+      return .composite(events.map { $0.targeting(target) })
+    default:
+      return self
+    }
   }
 }
 
@@ -213,20 +245,23 @@ public extension FBSimulatorHIDEvent {
   // Single-payload events use the enum cases directly (`.touch(direction:x:y:)`,
   // `.button(direction:button:)`, `.keyboard(direction:keyCode:)`, `.delay(_:)`,
   // `.deviceOrientation(_:)`, `.shake`, `.lockDevice`, `.toggleInCallStatusBar`, `.composite(_:)`).
-  // Only composites with real construction logic are wrapped here.
+  // Only composites with real construction logic are wrapped here. The touch factories take an
+  // optional display `target` (default `nil` = main display), applied to every touch they build.
 
-  static func tapAt(x: Double, y: Double) -> FBSimulatorHIDEvent {
+  static func tapAt(x: Double, y: Double, target: FBSimulatorHIDDisplayTarget? = nil) -> FBSimulatorHIDEvent {
     .composite([
-      .touch(direction: .down, x: x, y: y),
-      .touch(direction: .up, x: x, y: y),
+      .touch(direction: .down, x: x, y: y, target: target),
+      .touch(direction: .up, x: x, y: y, target: target),
     ])
   }
 
-  static func tapAt(x: Double, y: Double, duration: Double) -> FBSimulatorHIDEvent {
+  static func tapAt(
+    x: Double, y: Double, duration: Double, target: FBSimulatorHIDDisplayTarget? = nil
+  ) -> FBSimulatorHIDEvent {
     .composite([
-      .touch(direction: .down, x: x, y: y),
+      .touch(direction: .down, x: x, y: y, target: target),
       .delay(duration),
-      .touch(direction: .up, x: x, y: y),
+      .touch(direction: .up, x: x, y: y, target: target),
     ])
   }
 
@@ -254,7 +289,8 @@ public extension FBSimulatorHIDEvent {
   }
 
   static func swipe(
-    _ xStart: Double, yStart: Double, xEnd: Double, yEnd: Double, delta: Double, duration: Double
+    _ xStart: Double, yStart: Double, xEnd: Double, yEnd: Double, delta: Double, duration: Double,
+    target: FBSimulatorHIDDisplayTarget? = nil
   ) -> FBSimulatorHIDEvent {
     var events: [FBSimulatorHIDEvent] = []
     let distance = sqrt(pow(yEnd - yStart, 2) + pow(xEnd - xStart, 2))
@@ -270,20 +306,23 @@ public extension FBSimulatorHIDEvent {
     let stepDelay = duration / Double(steps + 2)
 
     for i in 0...steps {
-      events.append(.touch(direction: .down, x: xStart + dx * Double(i), y: yStart + dy * Double(i)))
+      events.append(
+        .touch(direction: .down, x: xStart + dx * Double(i), y: yStart + dy * Double(i), target: target))
       events.append(.delay(stepDelay))
     }
     // Add an additional touch down event at the end of the swipe to avoid inertial scroll on arm simulators.
-    events.append(.touch(direction: .down, x: xStart + dx * Double(steps), y: yStart + dy * Double(steps)))
+    events.append(
+      .touch(direction: .down, x: xStart + dx * Double(steps), y: yStart + dy * Double(steps), target: target))
     events.append(.delay(stepDelay))
 
-    events.append(.touch(direction: .up, x: xEnd, y: yEnd))
+    events.append(.touch(direction: .up, x: xEnd, y: yEnd, target: target))
 
     return .composite(events)
   }
 
   static func pinchAt(
-    x centerX: Double, y centerY: Double, scale: Double, duration: Double, radius: Double
+    x centerX: Double, y centerY: Double, scale: Double, duration: Double, radius: Double,
+    target: FBSimulatorHIDDisplayTarget? = nil
   ) -> FBSimulatorHIDEvent {
     let startRadius = radius
     let endRadius = radius * scale
@@ -299,7 +338,7 @@ public extension FBSimulatorHIDEvent {
     // Touch down at start positions (fingers on horizontal axis centered on target)
     let f1Start = CGPoint(x: centerX - startRadius, y: centerY)
     let f2Start = CGPoint(x: centerX + startRadius, y: centerY)
-    events.append(.twoFingerTouch(direction: .down, finger1: f1Start, finger2: f2Start))
+    events.append(.twoFingerTouch(direction: .down, finger1: f1Start, finger2: f2Start, target: target))
     events.append(.delay(stepDelay))
 
     // Interpolated moves — same pattern as swipe
@@ -308,18 +347,18 @@ public extension FBSimulatorHIDEvent {
       let r = startRadius + dr * Double(i)
       let f1 = CGPoint(x: centerX - r, y: centerY)
       let f2 = CGPoint(x: centerX + r, y: centerY)
-      events.append(.twoFingerTouch(direction: .down, finger1: f1, finger2: f2))
+      events.append(.twoFingerTouch(direction: .down, finger1: f1, finger2: f2, target: target))
       events.append(.delay(stepDelay))
     }
 
     // Duplicate final touch-down to avoid inertial scroll on arm simulators
     let f1End = CGPoint(x: centerX - endRadius, y: centerY)
     let f2End = CGPoint(x: centerX + endRadius, y: centerY)
-    events.append(.twoFingerTouch(direction: .down, finger1: f1End, finger2: f2End))
+    events.append(.twoFingerTouch(direction: .down, finger1: f1End, finger2: f2End, target: target))
     events.append(.delay(stepDelay))
 
     // Touch up at end positions
-    events.append(.twoFingerTouch(direction: .up, finger1: f1End, finger2: f2End))
+    events.append(.twoFingerTouch(direction: .up, finger1: f1End, finger2: f2End, target: target))
 
     return .composite(events)
   }
@@ -330,18 +369,19 @@ public extension FBSimulatorHIDEvent {
 extension FBSimulatorHIDEvent: CustomStringConvertible {
   public var description: String {
     switch self {
-    case let .touch(direction, x, y):
+    case let .touch(direction, x, y, target):
       guard shouldLogHIDEventDetails() else { return "Touch <hidden>" }
-      return "Touch \(direction.name) at (\(UInt(x)),\(UInt(y)))"
+      return "Touch \(direction.name) at (\(UInt(x)),\(UInt(y)))\(targetSuffix(target))"
     case let .button(direction, button):
       guard shouldLogHIDEventDetails() else { return "Button <hidden>" }
       return "Button \(button.name) \(direction.name)"
     case let .keyboard(direction, keyCode):
       guard shouldLogHIDEventDetails() else { return "Key <hidden>" }
       return "Keyboard Code=\(keyCode) \(direction.name)"
-    case let .twoFingerTouch(direction, finger1, finger2):
+    case let .twoFingerTouch(direction, finger1, finger2, target):
       guard shouldLogHIDEventDetails() else { return "TwoFingerTouch <hidden>" }
-      return "TwoFingerTouch \(direction.name) at (\(finger1.x),\(finger1.y)) (\(finger2.x),\(finger2.y))"
+      let points = "(\(finger1.x),\(finger1.y)) (\(finger2.x),\(finger2.y))"
+      return "TwoFingerTouch \(direction.name) at \(points)\(targetSuffix(target))"
     case let .delay(duration):
       return "Delay for \(duration)"
     case let .deviceOrientation(orientation):
@@ -359,6 +399,10 @@ extension FBSimulatorHIDEvent: CustomStringConvertible {
 }
 
 // MARK: - Private helpers
+
+private func targetSuffix(_ target: FBSimulatorHIDDisplayTarget?) -> String {
+  target.map { " on \($0)" } ?? ""
+}
 
 private func shouldLogHIDEventDetails() -> Bool {
   ProcessInfo.processInfo.environment["FBSIMULATORCONTROL_LOG_HID_DETAILS"]?.boolValue ?? false

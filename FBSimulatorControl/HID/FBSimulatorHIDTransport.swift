@@ -26,10 +26,15 @@ public enum FBSimulatorHIDTransportType: Equatable, Sendable {
 protocol FBSimulatorHIDTransport: Sendable {
   /// Tears down any resources held by the transport.
   func disconnect()
-  /// Sends a single-finger touch at the given point (in points).
-  func sendTouch(direction: FBSimulatorHIDDirection, x: Double, y: Double) async throws
-  /// Sends a two-finger touch (for multi-touch gestures) at the given points (in points).
-  func sendTwoFingerTouch(direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint) async throws
+  /// Sends a single-finger touch at the given point (in points). `target` selects the display
+  /// (`nil` = the main display); transports that cannot address other displays ignore it.
+  func sendTouch(
+    direction: FBSimulatorHIDDirection, x: Double, y: Double, target: FBSimulatorHIDDisplayTarget?) async throws
+  /// Sends a two-finger touch (for multi-touch gestures) at the given points (in points). `target`
+  /// as for `sendTouch`.
+  func sendTwoFingerTouch(
+    direction: FBSimulatorHIDDirection, finger1: CGPoint, finger2: CGPoint, target: FBSimulatorHIDDisplayTarget?
+  ) async throws
   /// Sends a hardware button event.
   func sendButton(direction: FBSimulatorHIDDirection, button: FBSimulatorHIDButton) async throws
   /// Sends a keyboard key event.
