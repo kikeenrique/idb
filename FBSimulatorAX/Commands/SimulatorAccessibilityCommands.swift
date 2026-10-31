@@ -50,21 +50,27 @@ final class SimulatorAccessibilityCommands {
   private static let springBoardServiceName = "com.apple.SpringBoard"
   /// watchOS's system shell, which provides its frontmost application as SpringBoard does elsewhere.
   private static let carouselServiceName = "com.apple.Carousel"
+  /// tvOS's system shell, which provides its frontmost application (HeadBoard on the home screen).
+  private static let pineBoardServiceName = "com.apple.PineBoard"
 
   /// The launchd service of the system shell that provides the frontmost application on `productFamily`.
   static func shellServiceName(for productFamily: ProductFamily) -> String {
-    productFamily == .appleWatch ? carouselServiceName : springBoardServiceName
+    switch productFamily {
+    case .appleWatch: carouselServiceName
+    case .appleTV: pineBoardServiceName
+    default: springBoardServiceName
+    }
   }
 
   /// The client a read's translator requests carry on `productFamily`, given the one the read asked for.
   ///
-  /// A watchOS application, Carousel included, answers its children only to a client that deserves its
-  /// automation tree: to no client (and to VoiceOver) it answers a childless application, so a read made as
-  /// no client would see nothing but the application. On watchOS such a read is made as XCTest instead, which
-  /// is what a UI test on the watch sees. A read that names any other client is made as that client, and other
-  /// platforms are unchanged.
+  /// A watchOS or tvOS application, the system shell's included, answers its children only to a client that
+  /// deserves its automation tree: to no client (and to VoiceOver) it answers a childless application, so a read
+  /// made as no client would see nothing but the application. On those platforms such a read is made as XCTest
+  /// instead, which is what a UI test there sees; on tvOS that tree also reports which element has focus. A read
+  /// that names any other client is made as that client, and other platforms are unchanged.
   static func effectiveClientType(_ clientType: AXClientType, productFamily: ProductFamily) -> AXClientType {
-    guard productFamily == .appleWatch, clientType == AccessibilityRequestOptions.unconfiguredClientType else {
+    guard [.appleWatch, .appleTV].contains(productFamily), clientType == AccessibilityRequestOptions.unconfiguredClientType else {
       return clientType
     }
     return .xctest

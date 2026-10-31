@@ -2087,25 +2087,31 @@ final class SimulatorAccessibilityCommandsTests: XCTestCase {
 
   // MARK: - watchOS
 
-  func testAWatchReadThatNamesNoClientIsMadeAsXCTest() {
-    XCTAssertEqual(SimulatorAccessibilityCommands.effectiveClientType(.noClient, productFamily: .appleWatch), .xctest)
-  }
-
-  func testAWatchReadThatNamesAClientKeepsIt() {
-    for client in AXClientType.allCases where client != .noClient {
-      XCTAssertEqual(SimulatorAccessibilityCommands.effectiveClientType(client, productFamily: .appleWatch), client)
+  func testAWatchOrTVReadThatNamesNoClientIsMadeAsXCTest() {
+    for family in [ProductFamily.appleWatch, .appleTV] {
+      XCTAssertEqual(SimulatorAccessibilityCommands.effectiveClientType(.noClient, productFamily: family), .xctest, "\(family)")
     }
   }
 
-  func testReadsOffTheWatchKeepTheirClient() {
-    for family in ProductFamily.allCases where family != .appleWatch {
+  func testAWatchOrTVReadThatNamesAClientKeepsIt() {
+    for family in [ProductFamily.appleWatch, .appleTV] {
+      for client in AXClientType.allCases where client != .noClient {
+        XCTAssertEqual(SimulatorAccessibilityCommands.effectiveClientType(client, productFamily: family), client, "\(family)")
+      }
+    }
+  }
+
+  func testReadsOffTheWatchAndTVKeepTheirClient() {
+    for family in ProductFamily.allCases where family != .appleWatch && family != .appleTV {
       XCTAssertEqual(SimulatorAccessibilityCommands.effectiveClientType(.noClient, productFamily: family), .noClient)
     }
   }
 
-  func testTheWatchShellIsCarousel() {
+  func testTheShellOfEachPlatform() {
     XCTAssertEqual(SimulatorAccessibilityCommands.shellServiceName(for: .appleWatch), "com.apple.Carousel")
+    XCTAssertEqual(SimulatorAccessibilityCommands.shellServiceName(for: .appleTV), "com.apple.PineBoard")
     XCTAssertEqual(SimulatorAccessibilityCommands.shellServiceName(for: .iPhone), "com.apple.SpringBoard")
+    XCTAssertEqual(SimulatorAccessibilityCommands.shellServiceName(for: .iPad), "com.apple.SpringBoard")
   }
 }
 
