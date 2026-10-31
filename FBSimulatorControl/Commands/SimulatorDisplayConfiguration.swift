@@ -20,7 +20,8 @@ public struct SimulatorDisplayConfiguration: Equatable, Sendable {
     case transitioning(incoming: SimulatorDisplay?)
   }
 
-  /// The display interactions target: the sole integrated display, or the active one of several.
+  /// The display interactions target: the sole integrated display, or the active one of several. A device without
+  /// an integrated display, such as an Apple TV, targets its sole primary display, whose backlight may read as off.
   public enum ActiveDisplay: Equatable, Sendable {
     case identified(SimulatorDisplay)
     /// The sole integrated display of a runtime that does not identify its displays.
@@ -28,7 +29,8 @@ public struct SimulatorDisplayConfiguration: Equatable, Sendable {
     /// No integrated display is active, or several are. A later configuration may settle on one.
     case unresolved
     /// The runtime cannot say which display interactions target: it reports an integrated display's activity
-    /// as `unknown`, or several integrated displays without identifying them.
+    /// as `unknown`, several integrated displays without identifying them, or displays of which none is integrated
+    /// and not exactly one is primary.
     case unknown
   }
 
@@ -202,7 +204,7 @@ package final class DisplayConfigurationTracker: @unchecked Sendable {
     case let .target(.selected(display)), let .target(.sole(.identified(display))): .identified(display)
     case let .target(.sole(.legacy(geometry))): .unidentified(geometry)
     case .fallback(.noActiveIntegratedDisplay), .fallback(.ambiguousActiveDisplays), .transitioning: .unresolved
-    case .fallback(.legacyIntegratedDisplays), .fallback(.unknownActivity), .fallback(.unreadable): .unknown
+    case .fallback(.legacyIntegratedDisplays), .fallback(.unknownActivity), .fallback(.noIntegratedDisplay), .fallback(.unreadable): .unknown
     }
   }
 }

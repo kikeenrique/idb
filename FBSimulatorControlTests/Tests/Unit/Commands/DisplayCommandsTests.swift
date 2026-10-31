@@ -134,6 +134,47 @@ struct DisplayCommandsTests {
     #expect(displays.reads > 1)
   }
 
+  private func tvOut(primary: Bool = true, id: String = "TVOut") -> SimulatorDisplay {
+    SimulatorDisplay(
+      uniqueID: id, name: "TVOut", activity: .inactive, isPrimary: primary, isIntegrated: false,
+      bounds: CGRect(x: 0, y: 0, width: 1920, height: 1080), scale: 1, rotation: .upright)
+  }
+
+  /// An Apple TV reports only its external TVOut, with its backlight `off`; it resolves on the first read.
+  @Test
+  func aSolePrimaryDisplayWithoutAnIntegratedOneResolvesAtOnce() async throws {
+    let displays = DisplayCommandsDouble([.success(.displays([tvOut()]))])
+    let resolved = try await displays.resolveDisplay()
+    #expect(resolved == .target(.sole(.identified(tvOut()))))
+    #expect(displays.reads == 1)
+    let configuration = try await displays.settledConfiguration(within: .zero)
+    #expect(configuration.active == .identified(tvOut()))
+    #expect(try configuration.activeGeometry().pointSize == CGSize(width: 1920, height: 1080))
+  }
+
+  /// No transition gives a device an integrated display, so its absence is not waited out.
+  @Test
+  func resolvingWithoutAnIntegratedOrSolePrimaryDisplayFailsAtOnce() async {
+    for report in [[tvOut(primary: false)], [tvOut(id: "a"), tvOut(id: "b")]] {
+      let displays = DisplayCommandsDouble([.success(.displays(report)), .success(.reporting(.sole(.identified(display("lcd")))))])
+      let resolved = await outcome { try await displays.resolveDisplay() }
+      guard case .failure(SimulatorDisplayInteractionError.unsupportedCapability) = resolved else {
+        Issue.record("\(resolved)")
+        continue
+      }
+      #expect(displays.reads == 1)
+    }
+  }
+
+  /// An empty report may come before a booting device lists its displays, so it is still waited out.
+  @Test
+  func resolvingWhileNoDisplayIsReportedWaitsForOne() async throws {
+    let displays = DisplayCommandsDouble([.success(.displays([])), .success(.reporting(.sole(.identified(display("lcd")))))])
+    let resolved = try await displays.resolveDisplay()
+    #expect(resolved == .target(.sole(.identified(display("lcd")))))
+    #expect(displays.reads == 2)
+  }
+
   @Test
   func fallbackIsAChangeFromAReportedDisplay() async throws {
     let displays = DisplayCommandsDouble([.success(.failed(.unsupported("displayinfo")))])

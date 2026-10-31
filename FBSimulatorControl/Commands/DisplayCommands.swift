@@ -42,7 +42,8 @@ package struct DisplayTransitionSettling: Sendable {
 
 /// The display an interaction targets, and whether routing has to name it.
 package enum SimulatorDisplayTarget: Equatable, Sendable {
-  /// The only integrated display. Accessibility and input reach it without naming it.
+  /// The only integrated display or, on a device without one, its only primary display (an Apple TV's
+  /// TVOut). Accessibility and input reach it without naming it.
   case sole(SimulatorInteractionDisplay)
   /// The active one of several integrated displays. Accessibility and input have to name it.
   case selected(SimulatorDisplay)
@@ -64,7 +65,9 @@ package enum SimulatorDisplayResolution: Equatable, Sendable {
   /// Layout has moved to a display whose backlight has not caught up, as after a hinge change.
   case transitioning
 
-  /// The sole integrated display, active or not, or the active one of several.
+  /// The sole integrated display, active or not, or the active one of several. A device that reports displays
+  /// but no integrated one, as an Apple TV reports only its external TVOut, targets its sole primary display,
+  /// active or not: tvOS reports the TVOut's backlight as `off` while it draws.
   init(_ report: SimulatorDisplayReport) {
     switch report {
     case let .legacy(integrated):
@@ -75,6 +78,15 @@ package enum SimulatorDisplayResolution: Equatable, Sendable {
       self = .target(.sole(.legacy(geometry)))
     case let .displays(displays):
       let integrated = displays.filter(\.isIntegrated)
+      if integrated.isEmpty, !displays.isEmpty {
+        let primary = displays.filter(\.isPrimary)
+        guard primary.count == 1, let display = primary.first else {
+          self = .fallback(.noIntegratedDisplay)
+          return
+        }
+        self = .target(.sole(.identified(display)))
+        return
+      }
       if integrated.contains(where: { $0.activity == .unknown }) {
         self = .fallback(.unknownActivity)
         return
@@ -102,7 +114,8 @@ package enum SimulatorDisplayResolution: Equatable, Sendable {
 }
 
 /// Why interactions fell back to the main display. One-shot resolution waits out no active display, or several,
-/// rather than falling back, as both pass during a hinge change.
+/// rather than falling back, as both pass during a hinge change. A device without an integrated display does not
+/// grow one, so no integrated display is not waited out.
 package enum SimulatorDisplayFallback: Equatable, Sendable {
   /// The display read failed, including on runtimes that do not report displays.
   case unreadable(SimulatorCoreDeviceError)
@@ -110,6 +123,8 @@ package enum SimulatorDisplayFallback: Equatable, Sendable {
   case legacyIntegratedDisplays(count: Int)
   /// The runtime reports an integrated display's backlight as `unknown`.
   case unknownActivity
+  /// The runtime reports displays, none of them integrated, and not exactly one of them primary.
+  case noIntegratedDisplay
   case noActiveIntegratedDisplay
   case ambiguousActiveDisplays([String])
 }
@@ -168,7 +183,8 @@ extension DisplayCommands {
   /// The display interactions target once any display transition has settled. A hinge change moves layout to
   /// the new display before its backlight follows, and can pass through no active display or several; one-shot
   /// resolution waits that out. `.transitioning` only when the transition outlasts `transitionSettling`, and throws
-  /// if no single display is active by then.
+  /// if no single display is active by then. A report without an integrated display or a sole primary one throws
+  /// at once: no transition gives a device an integrated display.
   package func resolveDisplay() async throws -> SimulatorDisplayResolution {
     let deadline = ContinuousClock.now + transitionSettling.timeout
     while true {
@@ -179,6 +195,8 @@ extension DisplayCommands {
         return resolution
       case .transitioning where expired:
         return resolution
+      case .fallback(.noIntegratedDisplay):
+        throw SimulatorDisplayInteractionError.unsupportedCapability("an integrated display, or a sole primary display")
       case .fallback(.noActiveIntegratedDisplay) where expired:
         throw SimulatorDisplayError.noActiveIntegratedDisplay
       case let .fallback(.ambiguousActiveDisplays(identities)) where expired:

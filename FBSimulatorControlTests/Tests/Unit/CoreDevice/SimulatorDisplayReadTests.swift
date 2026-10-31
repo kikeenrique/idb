@@ -253,19 +253,56 @@ struct SimulatorDisplayReadTests {
     #expect(resolution([]) == .fallback(.noActiveIntegratedDisplay))
   }
 
-  /// The shape tvOS reports: its only display is an external TVOut with backlight state but no layout activity.
+  private func externalDisplay(id: String, primary: Bool, backlight: String = "off") -> xpc_object_t {
+    let value = displayValue(id: id, active: false, primary: primary)
+    xpc_dictionary_set_value(value, "active", nil)
+    xpc_dictionary_set_string(value, "backlightState", backlight)
+    xpc_dictionary_set_value(value, "type", SimulatorCoreDevice.dictionary(["external": SimulatorCoreDevice.dictionary([:])]))
+    return value
+  }
+
+  /// The shape tvOS reports: its only display is an external, primary TVOut whose backlight reads `off` while it
+  /// draws, with no layout activity. It is the display interactions target.
   @Test
-  func reportWithOnlyAnExternalDisplayHasNoActiveIntegratedDisplay() throws {
-    let fallbacks: [String: SimulatorDisplayFallback] = [
-      "off": .noActiveIntegratedDisplay, "unknown": .legacyIntegratedDisplays(count: 0),
-    ]
-    for (state, fallback) in fallbacks {
-      let tvOut = displayValue(id: "TVOut", active: false, primary: true)
-      xpc_dictionary_set_value(tvOut, "active", nil)
-      xpc_dictionary_set_string(tvOut, "backlightState", state)
-      xpc_dictionary_set_value(tvOut, "type", SimulatorCoreDevice.dictionary(["external": SimulatorCoreDevice.dictionary([:])]))
-      #expect(resolution([tvOut]) == .fallback(fallback), "\(state)")
+  func reportWithOnlyAPrimaryExternalDisplayTargetsIt() throws {
+    let target = try target([externalDisplay(id: "TVOut", primary: true)])
+    guard case let .sole(.identified(display)) = target else {
+      Issue.record("Expected the TVOut as the sole display, got \(target)")
+      return
     }
+    #expect(display.uniqueID == "TVOut")
+    #expect(!display.isIntegrated)
+    #expect(display.isPrimary)
+    #expect(display.rotation == .upright)
+    #expect(display.geometry.pointSize == CGSize(width: 669, height: 951))
+    // Without a backlight state other than `unknown`, the record carries no activity: a legacy report, as before.
+    #expect(resolution([externalDisplay(id: "TVOut", primary: true, backlight: "unknown")]) == .fallback(.legacyIntegratedDisplays(count: 0)))
+  }
+
+  /// Displays of which none is integrated and not exactly one is primary leave nothing to target, and no transition
+  /// changes that.
+  @Test
+  func reportWithoutAnIntegratedOrSolePrimaryDisplayHasNoIntegratedDisplay() {
+    let shapes: [String: [xpc_object_t]] = [
+      "no primary display": [externalDisplay(id: "TVOut", primary: false)],
+      "two primary displays": [externalDisplay(id: "a", primary: true), externalDisplay(id: "b", primary: true)],
+    ]
+    for (shape, values) in shapes {
+      #expect(resolution(values) == .fallback(.noIntegratedDisplay), "\(shape)")
+    }
+  }
+
+  /// An external primary display beside an integrated one is not targeted: the integrated display is, as before.
+  @Test
+  func anIntegratedDisplayIsTargetedOverAPrimaryExternalOne() throws {
+    let tvOut = displayValue(id: "TVOut", active: false, primary: true)
+    xpc_dictionary_set_value(tvOut, "type", SimulatorCoreDevice.dictionary(["external": SimulatorCoreDevice.dictionary([:])]))
+    let target = try target([displayValue(id: "lcd", active: true), tvOut])
+    guard case let .sole(.identified(display)) = target else {
+      Issue.record("Expected the integrated display, got \(target)")
+      return
+    }
+    #expect(display.uniqueID == "lcd")
   }
 
   /// Reports that cannot select exactly one active integrated display, for any reason in their display records.
