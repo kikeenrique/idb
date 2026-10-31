@@ -2084,6 +2084,29 @@ final class SimulatorAccessibilityCommandsTests: XCTestCase {
     XCTAssertNil(result.match)
     XCTAssertEqual(result.diagnostics?.unmatchedValues, ["App Window", "Outer", "OK nested", "OK"])
   }
+
+  // MARK: - watchOS
+
+  func testAWatchReadThatNamesNoClientIsMadeAsXCTest() {
+    XCTAssertEqual(SimulatorAccessibilityCommands.effectiveClientType(.noClient, productFamily: .appleWatch), .xctest)
+  }
+
+  func testAWatchReadThatNamesAClientKeepsIt() {
+    for client in AXClientType.allCases where client != .noClient {
+      XCTAssertEqual(SimulatorAccessibilityCommands.effectiveClientType(client, productFamily: .appleWatch), client)
+    }
+  }
+
+  func testReadsOffTheWatchKeepTheirClient() {
+    for family in ProductFamily.allCases where family != .appleWatch {
+      XCTAssertEqual(SimulatorAccessibilityCommands.effectiveClientType(.noClient, productFamily: family), .noClient)
+    }
+  }
+
+  func testTheWatchShellIsCarousel() {
+    XCTAssertEqual(SimulatorAccessibilityCommands.shellServiceName(for: .appleWatch), "com.apple.Carousel")
+    XCTAssertEqual(SimulatorAccessibilityCommands.shellServiceName(for: .iPhone), "com.apple.SpringBoard")
+  }
 }
 
 /// Counts how many resolutions are inside the translator at once. `enter()` brackets

@@ -430,6 +430,8 @@ class SimDeviceAccessibilityDouble: NSObject {
   @objc var name: String = ""
   @objc var UDID: NSUUID = NSUUID()
   @objc var state: UInt64 = 0
+  /// No device type, so the simulator's product family is `.unknown`, as on a device type it does not map.
+  @objc var deviceType: NSObject?
   var accessibilityResponseHandler: AccessibilityResponseHandler?
   private let requestsLock = NSLock()
   private(set) var accessibilityRequests = NSMutableArray()
