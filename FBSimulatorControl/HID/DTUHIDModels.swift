@@ -100,6 +100,44 @@ struct IndigoButtonEvent: Encodable {
   let state: HIDButtonState
 }
 
+/// A scroll delta. On the Digital Crown only `y` moves anything: positive scrolls content toward its end.
+struct ScrollPoint: Encodable {
+  let x: Double
+  let y: Double
+  let z: Double
+}
+
+/// The control a scroll event turns. Encoded as a `uint64`. `dtuhidd` routes `digitalCrown` to the watch's
+/// crown service; a runtime without a dial logs "No dial service found for scroll event" and drops `dial`.
+enum ScrollTarget: UInt64, Encodable {
+  case digitalCrown = 0
+  case dial = 1
+}
+
+/**
+ The `dtuhidd` `IndigoScrollEvent` payload, sent to the scroll service: a relative `point`, the gesture
+ `phase` and `momentum` (both option sets carried as `uint64`; the crown moves the same with either left at
+ zero) and the `target` control. Field names are the guest's `Codable` keys (`CoreDeviceUtilities`).
+ */
+struct IndigoScrollEvent: Encodable {
+  let point: ScrollPoint
+  let phase: UInt64
+  let momentum: UInt64
+  let target: ScrollTarget
+
+  init(point: ScrollPoint, target: ScrollTarget, phase: UInt64 = 0, momentum: UInt64 = 0) {
+    self.point = point
+    self.phase = phase
+    self.momentum = momentum
+    self.target = target
+  }
+
+  /// One step of Digital Crown rotation.
+  static func digitalCrown(delta: Double) -> Self {
+    IndigoScrollEvent(point: ScrollPoint(x: 0, y: delta, z: 0), target: .digitalCrown)
+  }
+}
+
 /**
  The `dtuhidd` `IndigoVendorDefinedEvent` payload, sent to the vendor-defined service: a HID
  `usagePage` / `usage` pair identifying the control and an opaque `data` report the guest's

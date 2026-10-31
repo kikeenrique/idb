@@ -167,6 +167,29 @@ final class SimulatorDTUHIDTransportTests: XCTestCase {
     XCTAssertEqual(xpc_dictionary_get_uint64(payload, "state"), 1) // down
   }
 
+  func testDigitalCrownScrollEventWireShape() throws {
+    let event = try XPCEncoder().encode(
+      DTUHIDMessage(
+        messageType: "IndigoScrollEvent",
+        featureIdentifier: SimulatorScrollHIDTransport.serviceName,
+        payload: IndigoScrollEvent.digitalCrown(delta: -5)))
+    XCTAssertEqual(messageString(event, "messageType"), "IndigoScrollEvent")
+    XCTAssertEqual(messageString(event, "featureIdentifier"), "com.apple.coredevice.feature.remote.hid.scroll")
+
+    let payload = xpc_dictionary_get_dictionary(event, "payload")!
+    for key in ["phase", "momentum", "target"] {
+      XCTAssertEqual(xpc_get_type(xpc_dictionary_get_value(payload, key)!), XPC_TYPE_UINT64, "\(key) must be uint64")
+    }
+    XCTAssertEqual(xpc_dictionary_get_uint64(payload, "target"), 0) // digitalCrown
+    let point = xpc_dictionary_get_dictionary(payload, "point")!
+    for key in ["x", "y", "z"] {
+      XCTAssertEqual(xpc_get_type(xpc_dictionary_get_value(point, key)!), XPC_TYPE_DOUBLE, "\(key) must be double")
+    }
+    XCTAssertEqual(xpc_dictionary_get_double(point, "x"), 0)
+    XCTAssertEqual(xpc_dictionary_get_double(point, "y"), -5)
+    XCTAssertEqual(xpc_dictionary_get_double(point, "z"), 0)
+  }
+
   // MARK: - Send pipeline (envelope shape)
 
   /// The connection's `encode` wraps any `Encodable` payload in the shared `DTUHIDMessage` envelope —
